@@ -1,0 +1,22 @@
+# Node
+node_modules/
+dist/
+build/
+.next/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+env/
+
+# Secrets
+.env
+
+# OS / Editor
+.DS_Store
+.vscode/
+
+# Big media / docs (hackathon stuff)
+*.pptx
+*.mp4
