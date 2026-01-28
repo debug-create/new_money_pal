@@ -423,3 +423,18 @@ body {
   color: #ef4444; /* Red on hover */
   background: rgba(239, 68, 68, 0.1);
 }
+
+/* Magic Button Pulse Effect */
+@keyframes pulse-purple {
+  0% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.7); }
+  70% { box-shadow: 0 0 0 10px rgba(139, 92, 246, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(139, 92, 246, 0); }
+}
+
+.magic-button-glow {
+  animation: pulse-purple 2s infinite;
+  background: linear-gradient(135deg, #4f46e5, #8b5cf6);
+  color: white !important;
+  font-weight: bold;
+  border: none;
+}

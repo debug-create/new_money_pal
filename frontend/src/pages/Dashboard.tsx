@@ -13,7 +13,13 @@ export default function Dashboard() {
   const [transactions, setTransactions] = useState([]);
   const [goals, setGoals] = useState<any[]>([]); 
   const [totalExpense, setTotalExpense] = useState(0);
+  const [totalIncome, setTotalIncome] = useState(0); // NEW: Track Income separately
   const [chartData, setChartData] = useState<any[]>([]); 
+  
+  // MAGIC AI STATE
+  const [isMagicMode, setIsMagicMode] = useState(true);
+  const [magicText, setMagicText] = useState("");
+  const [isMagicLoading, setIsMagicLoading] = useState(false);
   
   // SIMULATOR STATE
   const [simCost, setSimCost] = useState("");
@@ -28,7 +34,7 @@ export default function Dashboard() {
     amount: "", 
     date: new Date().toISOString().slice(0, 10), 
     category: "General", 
-    transaction_type: "debit"
+    transaction_type: "debit" // Default
   });
   const [isSplit, setIsSplit] = useState(false);
   const [splitCount, setSplitCount] = useState(2);
@@ -48,9 +54,13 @@ export default function Dashboard() {
         const txData = await txRes.json();
         const safeData = Array.isArray(txData) ? txData : [];
         setTransactions(safeData as any);
-        const total = safeData.reduce((acc: number, t: any) => 
-            t.transaction_type === "debit" ? acc + (Number(t.amount) || 0) : acc, 0);
-        setTotalExpense(total);
+        
+        // Calculate Totals correctly
+        const exp = safeData.reduce((acc: number, t: any) => t.transaction_type === "debit" ? acc + (Number(t.amount) || 0) : acc, 0);
+        const inc = safeData.reduce((acc: number, t: any) => t.transaction_type === "credit" ? acc + (Number(t.amount) || 0) : acc, 0);
+        
+        setTotalExpense(exp);
+        setTotalIncome(inc);
       }
 
       const chartRes = await fetch("http://127.0.0.1:8000/api/transactions/chart-data", { headers: { "Authorization": `Bearer ${token}` } });
@@ -72,18 +82,43 @@ export default function Dashboard() {
 
   useEffect(() => { fetchData(); setIsReady(true); }, [fetchData]);
 
-  // --- 2. CALCULATORS ---
+  // --- 2. CALCULATORS & HANDLERS ---
   const calculateAffordability = (cost: number) => {
     if (!userProfile) return;
-    const balance = userProfile.monthly_allowance - totalExpense;
-    const remainingAfterPurchase = balance - cost;
-    const today = new Date();
-    const lastDay = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
-    const daysLeft = Math.max(1, lastDay - today.getDate());
-    const dailyBudget = remainingAfterPurchase / daysLeft;
+    // Current Balance = (Budget + Income) - Expenses
+    const currentBalance = (userProfile.monthly_allowance + totalIncome) - totalExpense;
+    const remainingAfterPurchase = currentBalance - cost;
     
     if (remainingAfterPurchase < 0) setSimResult("❌ You will be BROKE (Negative Balance). Don't do it.");
-    else setSimResult(`✅ Safe! You'll still have ₹${dailyBudget.toFixed(0)}/day left.`);
+    else setSimResult(`✅ Safe! You'll still have ₹${remainingAfterPurchase.toLocaleString()} left.`);
+  };
+
+  const handleMagicParse = async () => {
+    if (!magicText) return;
+    setIsMagicLoading(true);
+    const token = localStorage.getItem("token");
+    
+    try {
+        const res = await fetch("http://127.0.0.1:8000/api/transactions/magic-parse", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
+            body: JSON.stringify({ text: magicText })
+        });
+        const data = await res.json();
+        
+        setFormData(prev => ({
+            ...prev,
+            amount: data.amount || prev.amount,
+            description: data.description || prev.description,
+            category: data.category || prev.category,
+            transaction_type: "debit" // AI currently defaults to debit, user can switch manually if needed
+        }));
+        setIsMagicMode(false); 
+    } catch (e) {
+        alert("AI couldn't understand that. Try manual entry.");
+    } finally {
+        setIsMagicLoading(false);
+    }
   };
 
   const handleAddTransaction = async (e: React.FormEvent) => {
@@ -93,7 +128,7 @@ export default function Dashboard() {
     let finalAmount = parseFloat(formData.amount);
     let finalDesc = formData.description;
 
-    if (isSplit && splitCount > 1) {
+    if (isSplit && splitCount > 1 && formData.transaction_type === 'debit') {
         finalAmount = finalAmount / splitCount;
         finalDesc = `${formData.description} (Split 1/${splitCount})`;
     }
@@ -112,14 +147,15 @@ export default function Dashboard() {
     setShowModal(false);
     setFormData(prev => ({ ...prev, description: "", amount: "", category: "General", transaction_type: "debit" }));
     setIsSplit(false); 
+    setMagicText(""); 
+    setIsMagicMode(true); 
     fetchData();
   };
 
   if (!isReady || !userProfile) return <div style={{padding: '40px', textAlign: 'center'}}>Loading MoneyPal...</div>;
   const allowance = userProfile.monthly_allowance || 0;
-  
-  // Calculate Actual Savings for the Goal
-  const currentSavings = Math.max(0, allowance - totalExpense);
+  // Correct Balance Formula: (Budget + Extra Income) - Expenses
+  const currentBalance = (allowance + totalIncome) - totalExpense;
 
   // --- VIEW: BUDGET SETUP ---
   if (allowance === 0) {
@@ -157,10 +193,10 @@ export default function Dashboard() {
 
       <div className="stats-grid">
         {[
-          { label: "Remaining Balance", val: allowance - totalExpense, icon: DollarSign, color: "#10b981", bg: "income-bg" },
+          { label: "Current Balance", val: currentBalance, icon: DollarSign, color: "#10b981", bg: "income-bg" },
           { label: "Monthly Budget", val: allowance, icon: TrendingUp, color: "#3b82f6", bg: "expense-bg" },
           { label: "Total Spent", val: totalExpense, icon: CreditCard, color: "#ef4444", bg: "wallet-bg" },
-          { label: "Potential Savings", val: (allowance - totalExpense) * 0.2, icon: Wallet, color: "#d946ef", bg: "saving-bg" }
+          { label: "Total Saved", val: Math.max(0, currentBalance), icon: Wallet, color: "#d946ef", bg: "saving-bg" }
         ].map((item, i) => (
           <div key={i} className="stat-card glass-panel">
             <div className={`stat-icon ${item.bg}`}><item.icon size={28} color={item.color} /></div>
@@ -189,7 +225,7 @@ export default function Dashboard() {
             )}
         </div>
 
-        {/* GOAL TRACKER (FIXED) */}
+        {/* GOAL TRACKER */}
         <div className="glass-panel" style={{position: 'relative'}}>
             <div style={{display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px'}}>
                 <div style={{padding:'10px', background:'#fdf4ff', borderRadius:'12px'}}><Target size={24} color="#d946ef" /></div>
@@ -197,11 +233,9 @@ export default function Dashboard() {
             </div>
             {goals.length > 0 ? (
                 goals.slice(0, 1).map((goal: any) => {
-                    // DYNAMIC CALCULATION: Mapped Savings to Goal
-                    const percent = Math.min(100, (currentSavings / goal.target_amount) * 100);
+                    const percent = Math.min(100, (currentBalance / goal.target_amount) * 100);
                     return (
                         <div key={goal.id || goal._id}>
-                            {/* TRASH BUTTON - Absolute Position Top Right */}
                             <button 
                                 onClick={async () => { 
                                     const token = localStorage.getItem("token"); 
@@ -217,8 +251,7 @@ export default function Dashboard() {
 
                             <div style={{display:'flex', justifyContent:'space-between', marginBottom:'10px', paddingRight: '25px'}}>
                                 <span style={{fontWeight:'700', fontSize:'16px', color:'#1e293b'}}>{goal.title}</span>
-                                {/* Shows ACTUAL SAVINGS vs TARGET */}
-                                <span style={{fontWeight:'600', color:'#64748b'}}>₹{currentSavings} / ₹{goal.target_amount}</span>
+                                <span style={{fontWeight:'600', color:'#64748b'}}>₹{currentBalance} / ₹{goal.target_amount}</span>
                             </div>
                             <div className="progress-bar-bg"><div className="progress-bar-fill" style={{width: `${percent}%`}}></div></div>
                             <p style={{fontSize:'13px', color:'#94a3b8', marginTop:'12px'}}>
@@ -277,47 +310,106 @@ export default function Dashboard() {
         <div className="modal-overlay">
           <div className="modal-content glass-panel">
             <button onClick={() => setShowModal(false)} className="close-btn"><X size={24} /></button>
-            <h2 style={{fontSize:'24px', fontWeight:'800', marginBottom:'25px', color:'#1e293b'}}>Add Expense</h2>
-            <form onSubmit={handleAddTransaction} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-              
-              <input type="text" placeholder="Description" required value={formData.description} onChange={(e) => setFormData({...formData, description: e.target.value})} className="input-glass" />
-              
-              <div style={{ display: 'flex', gap: '15px' }}>
-                  <input type="number" placeholder="Amount (₹)" required value={formData.amount} onChange={(e) => setFormData({...formData, amount: e.target.value})} className="input-glass" style={{flex: 1}} />
-                  
-                  {showDatePicker ? (
-                      <input type="date" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} className="input-glass" />
-                  ) : (
-                      <button type="button" onClick={() => setShowDatePicker(true)} className="btn-date" style={{padding:'14px', borderRadius:'14px', border:'1px solid #cbd5e1', background:'#f8fafc', color:'#64748b', cursor:'pointer', display:'flex', alignItems:'center', gap:'8px', fontSize:'14px'}}>
-                          <Calendar size={18} /> {formData.date === new Date().toISOString().slice(0, 10) ? "Today" : formData.date}
-                      </button>
-                  )}
-              </div>
+            
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'20px'}}>
+                <h2 style={{fontSize:'24px', fontWeight:'800', color:'#1e293b'}}>Add Transaction</h2>
+                <button 
+                    onClick={() => setIsMagicMode(!isMagicMode)}
+                    className="magic-button-glow"
+                    style={{fontSize:'12px', padding:'5px 10px', borderRadius:'15px', cursor:'pointer'}}
+                >
+                    {isMagicMode ? "Switch to Manual" : "✨ Switch to Magic AI"}
+                </button>
+            </div>
 
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#f8fafc', padding: '15px', borderRadius: '16px' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <Users size={20} color="#64748b" />
-                      <span style={{ fontSize: '15px', color: '#475569', fontWeight:'500' }}>Split Bill?</span>
-                  </div>
-                  <input type="checkbox" checked={isSplit} onChange={(e) => setIsSplit(e.target.checked)} style={{ width: '20px', height: '20px', accentColor: '#8b5cf6' }} />
-              </div>
+            {isMagicMode ? (
+                <div style={{textAlign:'center', padding:'20px 0'}}>
+                    <div style={{marginBottom:'15px', fontSize:'14px', color:'#64748b'}}>
+                        Type naturally: <br/> <i>"Spent 450 on uber to airport"</i>
+                    </div>
+                    <textarea 
+                        value={magicText}
+                        onChange={(e) => setMagicText(e.target.value)}
+                        placeholder="Tell AI what you spent..."
+                        style={{width:'100%', height:'80px', padding:'15px', borderRadius:'16px', border:'2px solid #a5b4fc', outline:'none', fontSize:'16px', marginBottom:'15px'}}
+                    />
+                    <button 
+                        onClick={handleMagicParse} 
+                        disabled={isMagicLoading}
+                        className="btn-primary-glow" 
+                        style={{width:'100%', justifyContent:'center'}}
+                    >
+                        {isMagicLoading ? "AI is Reading..." : "✨ Auto-Fill Form"}
+                    </button>
+                </div>
+            ) : (
+                <form onSubmit={handleAddTransaction} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                    
+                    {/* NEW: TRANSACTION TYPE TOGGLE */}
+                    <div style={{display:'flex', gap:'10px', background:'#f1f5f9', padding:'5px', borderRadius:'12px'}}>
+                        <button 
+                            type="button"
+                            onClick={() => setFormData({...formData, transaction_type: "debit"})}
+                            style={{
+                                flex: 1, padding:'10px', borderRadius:'10px', border:'none', cursor:'pointer', fontWeight:'600',
+                                background: formData.transaction_type === 'debit' ? '#ef4444' : 'transparent',
+                                color: formData.transaction_type === 'debit' ? 'white' : '#64748b'
+                            }}
+                        >
+                            Expense 💸
+                        </button>
+                        <button 
+                            type="button"
+                            onClick={() => setFormData({...formData, transaction_type: "credit"})}
+                            style={{
+                                flex: 1, padding:'10px', borderRadius:'10px', border:'none', cursor:'pointer', fontWeight:'600',
+                                background: formData.transaction_type === 'credit' ? '#10b981' : 'transparent',
+                                color: formData.transaction_type === 'credit' ? 'white' : '#64748b'
+                            }}
+                        >
+                            Income 💰
+                        </button>
+                    </div>
 
-              {isSplit && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '15px', backgroundColor: '#eff6ff', padding: '15px', borderRadius: '16px' }}>
-                      <span style={{ fontSize: '14px', fontWeight:'600', color:'#1e293b' }}>Split with:</span>
-                      <select value={splitCount} onChange={(e) => setSplitCount(Number(e.target.value))} style={{ padding: '8px', borderRadius: '8px', border: '1px solid #bfdbfe', background:'white', outline:'none' }}>
-                          <option value="2">1 Friend</option>
-                          <option value="3">2 Friends</option>
-                          <option value="4">3 Friends</option>
-                      </select>
-                      <span style={{ fontSize: '14px', fontWeight: '700', color: '#3b82f6', marginLeft:'auto' }}>
-                          My Share: ₹{(Number(formData.amount) / splitCount).toFixed(0)}
-                      </span>
-                  </div>
-              )}
+                    <input type="text" placeholder="Description" required value={formData.description} onChange={(e) => setFormData({...formData, description: e.target.value})} className="input-glass" />
+                    
+                    <div style={{ display: 'flex', gap: '15px' }}>
+                        <input type="number" placeholder="Amount (₹)" required value={formData.amount} onChange={(e) => setFormData({...formData, amount: e.target.value})} className="input-glass" style={{flex: 1}} />
+                        
+                        {showDatePicker ? (
+                            <input type="date" value={formData.date} onChange={(e) => setFormData({...formData, date: e.target.value})} className="input-glass" />
+                        ) : (
+                            <button type="button" onClick={() => setShowDatePicker(true)} className="btn-date" style={{padding:'14px', borderRadius:'14px', border:'1px solid #cbd5e1', background:'#f8fafc', color:'#64748b', cursor:'pointer', display:'flex', alignItems:'center', gap:'8px', fontSize:'14px'}}>
+                                <Calendar size={18} /> {formData.date === new Date().toISOString().slice(0, 10) ? "Today" : formData.date}
+                            </button>
+                        )}
+                    </div>
 
-              <button type="submit" className="btn-primary-glow" style={{justifyContent: 'center', marginTop:'10px'}}>Save Transaction</button>
-            </form>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#f8fafc', padding: '15px', borderRadius: '16px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                            <Users size={20} color="#64748b" />
+                            <span style={{ fontSize: '15px', color: '#475569', fontWeight:'500' }}>Split Bill?</span>
+                        </div>
+                        <input type="checkbox" checked={isSplit} onChange={(e) => setIsSplit(e.target.checked)} style={{ width: '20px', height: '20px', accentColor: '#8b5cf6' }} />
+                    </div>
+
+                    {isSplit && (
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '15px', backgroundColor: '#eff6ff', padding: '15px', borderRadius: '16px' }}>
+                            <span style={{ fontSize: '14px', fontWeight:'600', color:'#1e293b' }}>Split with:</span>
+                            <select value={splitCount} onChange={(e) => setSplitCount(Number(e.target.value))} style={{ padding: '8px', borderRadius: '8px', border: '1px solid #bfdbfe', background:'white', outline:'none' }}>
+                                <option value="2">1 Friend</option>
+                                <option value="3">2 Friends</option>
+                                <option value="4">3 Friends</option>
+                            </select>
+                            <span style={{ fontSize: '14px', fontWeight: '700', color: '#3b82f6', marginLeft:'auto' }}>
+                                My Share: ₹{(Number(formData.amount) / splitCount).toFixed(0)}
+                            </span>
+                        </div>
+                    )}
+
+                    <button type="submit" className="btn-primary-glow" style={{justifyContent: 'center', marginTop:'10px'}}>Save Transaction</button>
+                </form>
+            )}
           </div>
         </div>
       )}

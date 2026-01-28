@@ -7,9 +7,11 @@ import json
 
 class AIService:
     def __init__(self):
-        self.api_key = settings.GEMINI_API_KEY
-        # This is the most stable endpoint for free-tier keys
-        self.api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
+        self.api_key = settings.GROQ_API_KEY
+        # Groq OpenAI-compatible endpoint
+        self.api_url = "https://api.groq.com/openai/v1/chat/completions"
+        self.model = "llama3-70b-8192"  # Using Llama 3 for good financial reasoning
+
     def _extract_text_from_file(self, file_bytes: bytes, filename: str) -> str:
         """Helper to extract raw text from PDF or CSV bytes"""
         try:
@@ -37,24 +39,34 @@ class AIService:
                 file_context = f"\n\n--- USER UPLOADED FILE ({filename}) ---\n{extracted_text}\n----------------\n"
 
             system_instruction = "You are FinWise AI, a helpful financial coach. Analyze the user's data and provide brief, professional advice."
-            full_message = f"{system_instruction}{file_context}\nUser Query: {prompt}"
+            
+            # Construct messages for Groq (OpenAI format)
+            messages = [
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": f"{file_context}\nUser Query: {prompt}"}
+            ]
 
             payload = {
-                "contents": [{
-                    "parts": [{"text": full_message}]
-                }]
+                "model": self.model,
+                "messages": messages,
+                "temperature": 0.7
+            }
+
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
             }
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     self.api_url, 
                     json=payload,
+                    headers=headers,
                     timeout=30.0 
                 )
                 
-                # NEW: Catch Quota Error
                 if response.status_code == 429:
-                    print("Quota hit on Gemini API")
+                    print("Quota hit on Groq API")
                     return "ERROR_QUOTA_EXCEEDED"
 
                 if response.status_code != 200:
@@ -62,7 +74,8 @@ class AIService:
                     return "I'm having trouble connecting to my brain. Please try again in a moment."
 
                 data = response.json()
-                return data['candidates'][0]['content']['parts'][0]['text']
+                # Parse Groq/OpenAI format response
+                return data['choices'][0]['message']['content']
             
         except Exception as e:
             print(f"Generation Error: {str(e)}")

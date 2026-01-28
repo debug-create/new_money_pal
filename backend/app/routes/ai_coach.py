@@ -1,6 +1,8 @@
 import os
 import json
-from fastapi import APIRouter, Depends
+import io
+import pypdf
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel
 from app.utils.security import get_current_user
 from app.models.user import User
@@ -16,20 +18,37 @@ router = APIRouter(tags=["AI Coach"])
 # Ensure GROQ_API_KEY is in your .env file
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 
-class ChatRequest(BaseModel):
-    message: str
-
 class AuditRequest(BaseModel):
     transactions: list
 
-# --- CHAT ENDPOINT (The Coach) ---
+# --- CHAT ENDPOINT (With Language Support) ---
 @router.post("/chat")
-async def chat_with_coach(request: ChatRequest, current_user: User = Depends(get_current_user)):
-    user_message = request.message
-    
-    # 1. FETCH REAL FINANCIAL CONTEXT
+async def chat_with_coach(
+    message: str = Form(...),
+    language: str = Form("English"), # <--- IMPORTANT: Accepts language from frontend
+    file: UploadFile = File(None),
+    current_user: User = Depends(get_current_user)
+):
+    # 1. READ FILE (IF UPLOADED)
+    file_context = ""
+    has_file = False
+    if file:
+        try:
+            content = await file.read()
+            if file.filename.endswith(".pdf"):
+                pdf = pypdf.PdfReader(io.BytesIO(content))
+                # Read first 5 pages for better context
+                text = "".join([page.extract_text() for page in pdf.pages[:5]])
+                file_context = f"--- START OF USER UPLOADED PDF ({file.filename}) ---\n{text}\n--- END OF PDF ---\n"
+                has_file = True
+            elif file.filename.endswith(".csv"):
+                file_context = f"--- START OF USER UPLOADED CSV ({file.filename}) ---\n{content.decode('utf-8')[:3000]}\n--- END OF CSV ---\n"
+                has_file = True
+        except Exception as e:
+            file_context = f"\n[System Error: Could not read file: {str(e)}]\n"
+
+    # 2. FETCH REAL FINANCIAL CONTEXT (Database)
     txs = await Transaction.find(Transaction.user_id == current_user.id).to_list()
-    
     income = sum(t.amount for t in txs if t.transaction_type == 'credit')
     expenses = sum(t.amount for t in txs if t.transaction_type == 'debit')
     balance = income - expenses
@@ -37,25 +56,25 @@ async def chat_with_coach(request: ChatRequest, current_user: User = Depends(get
     goals = await Goal.find(Goal.user_id == current_user.id).to_list()
     goal_summary = ", ".join([f"{g.title} (₹{g.current_amount}/₹{g.target_amount})" for g in goals])
 
-    # 2. SYSTEM PROMPT (FRIENDLY & INDIAN CONTEXT)
+    # 3. SYSTEM PROMPT (With Language Injection)
     system_instruction = f"""
-    You are MoneyPal, a friendly and smart financial buddy for {current_user.full_name}.
+    You are MoneyPal, an empathetic, professional, and clear financial coach for {current_user.full_name}.
     
-    REAL TIME DATA:
-    - Income: ₹{income}
-    - Expenses: ₹{expenses}
-    - Balance: ₹{balance}
-    - Goals: {goal_summary or "None"}
+    [DATA SOURCE 1: APP DATABASE (Real-time)]
+    - Current App Balance: ₹{balance} (Income: ₹{income}, Expenses: ₹{expenses})
+    - Active Goals: {goal_summary or "None"}
+    
+    [DATA SOURCE 2: USER UPLOADED FILE]
+    {file_context if has_file else "No file uploaded in this turn."}
 
-    STYLE GUIDE:
-    1. STRICTLY USE INDIAN RUPEES (₹) for all currency. Never use $.
-    2. Speak like a smart college senior, not a bank.
-    3. Avoid jargon like "deficit". Say "you're running low" or "you overspent".
-    4. Be encouraging but honest.
-    5. Keep answers short (max 2 sentences).
+    INSTRUCTIONS:
+    1. OUTPUT LANGUAGE: Strictly reply in {language}.
+    2. PRIORITY RULE: If [DATA SOURCE 2] exists, your answer must be based 90% on that file.
+    3. TONE: Be helpful, positive, and clear.
+    4. CURRENCY: Strictly use Indian Rupees (₹).
     
-    TRIGGER: If the user explicitly agrees to set a savings goal (e.g., "Yes, track the guitar"), 
-    you MUST output a JSON object inside a code block like this:
+    [MAGIC TRIGGER - IMPORTANT]
+    Even if you reply in {language}, if the user sets a goal, you MUST output the JSON block in ENGLISH standard format:
     ```json
     {{
       "action": "create_goal",
@@ -70,15 +89,15 @@ async def chat_with_coach(request: ChatRequest, current_user: User = Depends(get
         completion = client.chat.completions.create(
             messages=[
                 {"role": "system", "content": system_instruction},
-                {"role": "user", "content": user_message}
+                {"role": "user", "content": message}
             ],
             model="llama-3.3-70b-versatile", 
-            temperature=0.6,
+            temperature=0.5, 
         )
         
         ai_response = completion.choices[0].message.content
 
-        # 4. PARSE FOR JSON TRIGGER (Goal Setting)
+        # 4. PARSE FOR JSON TRIGGER (Magic Goal Logic)
         if "```json" in ai_response:
             try:
                 json_str = ai_response.split("```json")[1].split("```")[0].strip()
@@ -101,45 +120,36 @@ async def chat_with_coach(request: ChatRequest, current_user: User = Depends(get
                     )
                     await new_goal.insert()
                     
-                    return {"reply": f"Done! 🎯 I've officially created the goal '{data['title']}' on your dashboard. You need to save ₹{monthly:.0f}/month."}
+                    return {"reply": f"Done! 🎯 (Goal Created: {data['title']})"}
             except Exception as e:
                 print(f"JSON Parse Error: {e}")
-                return {"reply": "I tried to create that goal, but my wiring got crossed. Please try again!"}
+                return {"reply": ai_response}
 
         return {"reply": ai_response}
 
     except Exception as e:
         print(f"AI Error: {e}")
-        return {"reply": "My brain is offline momentarily. (Check GROQ_API_KEY in backend)"}
+        return {"reply": "I'm having trouble analyzing that right now. Please check your internet connection."}
 
-# --- AUDIT ENDPOINT (The Smart Analyst) ---
+# --- AUDIT ENDPOINT (Unchanged) ---
 @router.post("/audit")
 async def audit_finances(data: AuditRequest, current_user: User = Depends(get_current_user)):
-    """
-    Takes a list of recent transactions and gives a professional analysis.
-    """
     if not data.transactions:
-        return {"audit": "No transactions found! Go spend some money (or earn some) first."}
+        return {"audit": "No transactions found! Add some expenses first."}
 
-    # FIX: Added Date to the summary so AI can calculate frequency/annual cost
     tx_summary = "\n".join([f"- {t['date'][:10]}: {t['description']} - ₹{t['amount']} ({t['category']})" for t in data.transactions[:15]])
     
-    # 3. AUDIT PROMPT (PROFESSIONAL & INSIGHTFUL)
     prompt = f"""
     You are MoneyPal's Senior Financial Analyst. 
-    Here are {current_user.full_name}'s recent transactions (Date: Description - Amount):
+    Here are {current_user.full_name}'s recent transactions:
     {tx_summary}
 
     TASK:
-    1. 🔍 **Pattern Detection:** Identify one subtle spending habit that is draining money based on the frequency of dates.
-    2. 📉 **The Projection:** Calculate how much this habit costs per year if unchecked. (e.g., "₹50/day = ₹18,000/year").
-    3. 💡 **Strategic Move:** Give one professional, actionable step to optimize this.
+    1. Identify one spending habit to improve.
+    2. Calculate the yearly cost of this habit.
+    3. Suggest one easy fix.
 
-    CONSTRAINTS:
-    - Keep it concise (maximum 3 bullet points).
-    - Use Indian Rupees (₹).
-    - Tone: Professional, insightful, encouraging. 
-    - No fluff. Go straight to the data.
+    Keep it professional and encouraging. Use Indian Rupees (₹).
     """
 
     try:
@@ -150,5 +160,4 @@ async def audit_finances(data: AuditRequest, current_user: User = Depends(get_cu
         )
         return {"audit": completion.choices[0].message.content}
     except Exception as e:
-        print(f"Audit AI Error: {e}")
-        return {"audit": "I need more data to analyze properly! (AI Error)"}
+        return {"audit": "I need more data to analyze properly!"}

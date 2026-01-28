@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from beanie import init_beanie
-import certifi # Keep this if you are using the certifi fix, otherwise remove
+import certifi
 
 # Import models
 from app.models.user import User
@@ -13,7 +13,7 @@ from app.models.transaction import Transaction
 from app.models.goal import Goal
 
 # Import routes
-from app.routes import ai_coach, auth, transactions, goals, users # <--- Added 'users'
+from app.routes import ai_coach, auth, transactions, goals, users
 
 load_dotenv()
 
@@ -21,13 +21,20 @@ load_dotenv()
 async def lifespan(app: FastAPI):
     uri = os.getenv("MONGODB_URI")
     try:
-        # Standard connection (using tlsAllowInvalidCertificates for your network)
-        client = AsyncIOMotorClient(
-            uri,
-            tls=True,
-            tlsAllowInvalidCertificates=True
-        )
+        # DB Connection Logic
+        if "localhost" in uri or "127.0.0.1" in uri:
+            # Local connection (No TLS needed)
+            client = AsyncIOMotorClient(uri)
+            print("💻 Connecting to Local Database...")
+        else:
+            # Cloud connection (MongoDB Atlas needs TLS)
+            client = AsyncIOMotorClient(
+                uri,
+                tlsCAFile=certifi.where() # Uses the correct certificate bundle
+            )
+            print("☁️ Connecting to Cloud Database...")
         
+        # Ping to verify connection
         await client.admin.command('ping')
         
         # Initialize Beanie with ALL models
@@ -37,7 +44,9 @@ async def lifespan(app: FastAPI):
         yield
     except Exception as e:
         print(f"❌ DB Connection Failed: {e}")
-        raise e
+        # We do not raise e here to allow the server to start even if DB fails, 
+        # but API calls will fail until DB is fixed.
+        yield
 
 app = FastAPI(title="MoneyPal AI API", lifespan=lifespan)
 
@@ -53,7 +62,7 @@ app.add_middleware(
 
 # REGISTER ROUTERS
 app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
-app.include_router(users.router, prefix="/api/users", tags=["Users"]) # <--- NEW: Connected the User Profile route
+app.include_router(users.router, prefix="/api/users", tags=["Users"])
 app.include_router(ai_coach.router, prefix="/api", tags=["AI Coach"])
 app.include_router(transactions.router, prefix="/api", tags=["Transactions"])
 app.include_router(goals.router, prefix="/api", tags=["Goals"])
